@@ -13,7 +13,9 @@ from custom_components.homewizard_instant.coordinator import (
 from custom_components.homewizard_instant.entity import HomeWizardEntity
 
 
-async def test_entity_device_info_identifiers(hass, mock_config_entry, mock_combined_data):
+async def test_entity_device_info_identifiers(
+    hass, mock_config_entry, mock_combined_data
+):
     """Test entity uses DOMAIN-prefixed identifiers."""
     mock_config_entry.add_to_hass(hass)
 
@@ -28,7 +30,9 @@ async def test_entity_device_info_identifiers(hass, mock_config_entry, mock_comb
     assert (DOMAIN, f"{DOMAIN}_{mock_combined_data.device.serial}") in identifiers
 
 
-async def test_entity_device_info_connections(hass, mock_config_entry, mock_combined_data):
+async def test_entity_device_info_connections(
+    hass, mock_config_entry, mock_combined_data
+):
     """Test entity registers MAC connection for DHCP registered_devices matching."""
     mock_config_entry.add_to_hass(hass)
 

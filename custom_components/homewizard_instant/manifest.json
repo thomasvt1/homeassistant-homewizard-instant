@@ -1,19 +1,28 @@
 {
   "domain": "homewizard_instant",
   "name": "HomeWizard Instant",
-  "codeowners": ["@taurgis"],
+  "codeowners": [
+    "@thomasvt1"
+  ],
   "config_flow": true,
   "dhcp": [
     {
       "registered_devices": true
     }
   ],
-  "documentation": "https://github.com/taurgis/homeassistant-homewizard-instant",
+  "documentation": "https://github.com/thomasvt1/homeassistant-homewizard-instant",
   "integration_type": "device",
-  "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/taurgis/homeassistant-homewizard-instant/issues",
-  "loggers": ["homewizard_instant"],
-  "requirements": ["python-homewizard-energy>=10.0.1"],
-  "version": "1.0.3",
-  "zeroconf": ["_hwenergy._tcp.local.", "_homewizard._tcp.local."]
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/thomasvt1/homeassistant-homewizard-instant/issues",
+  "loggers": [
+    "homewizard_instant"
+  ],
+  "requirements": [
+    "python-homewizard-energy==10.2.0"
+  ],
+  "version": "2.0.0",
+  "zeroconf": [
+    "_hwenergy._tcp.local.",
+    "_homewizard._tcp.local."
+  ]
 }

@@ -1,3 +1,10 @@
+# 2.0.0
+
+- Replace API v1 one-second polling with TLS-verified API v2 WebSocket subscriptions.
+- Add button pairing, legacy-entry migration, revoked-token reauthentication and reconnect backoff.
+- Preserve sensor IDs and model mappings, and keep uptime timestamps stable between system pushes.
+- Add protocol/lifecycle tests and pin a reproducible Home Assistant 2025.10 test environment.
+
 # Changelog
 
 ## 1.0.3
