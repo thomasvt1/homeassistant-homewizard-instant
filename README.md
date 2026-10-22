@@ -4,6 +4,8 @@ A fork of [taurgis/homeassistant-homewizard-instant](https://github.com/taurgis/
 
 ## Install
 
+[![Open your Home Assistant instance and add a custom repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=thomasvt1&repository=homeassistant-homewizard-instant&category=integration)
+
 1. Add `https://github.com/thomasvt1/homeassistant-homewizard-instant` as a HACS custom repository (Integration), or copy `custom_components/homewizard_instant` into your Home Assistant config directory.
 2. Restart Home Assistant, then add **HomeWizard Instant** under Settings → Devices & services.
 3. Enter the P1 meter's local IP address. When prompted, press its button and submit within 30 seconds. If the window expires, submit to reopen it, then press and submit again.
