@@ -1,6 +1,6 @@
 # HomeWizard Instant
 
-This fork supports P1 meters through API v2 WebSockets. Keep the `homewizard_instant` domain and existing DOMAIN-prefixed entry, device and sensor identifiers stable.
+This fork supports P1 meters and DIN-rail kWh meters (`SUPPORTED_MODELS` in const.py) through API v2 WebSockets. Keep the `homewizard_instant` domain and existing DOMAIN-prefixed entry, device and sensor identifiers stable.
 
 - Centralize snapshots in `HWEnergyDeviceUpdateCoordinator`; entities consume its data without polling.
 - Keep one authenticated WebSocket per entry and use the Home Assistant-managed aiohttp session.

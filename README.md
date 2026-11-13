@@ -1,6 +1,6 @@
 # HomeWizard Instant — API v2 WebSocket fork
 
-A fork of [taurgis/homeassistant-homewizard-instant](https://github.com/taurgis/homeassistant-homewizard-instant) for HomeWizard **P1 meters**, using authenticated API v2 WebSocket push updates. Requires Home Assistant 2025.10 or newer and P1 firmware supporting `/api/ws`.
+A fork of [taurgis/homeassistant-homewizard-instant](https://github.com/taurgis/homeassistant-homewizard-instant) for HomeWizard **P1 meters** and **DIN-rail kWh meters** (HWE-KWH1, HWE-KWH3, SDM230-wifi, SDM630-wifi), using authenticated API v2 WebSocket push updates. Requires Home Assistant 2025.10 or newer and device firmware supporting `/api/ws`.
 
 ## Install
 
@@ -8,7 +8,7 @@ A fork of [taurgis/homeassistant-homewizard-instant](https://github.com/taurgis/
 
 1. Add `https://github.com/thomasvt1/homeassistant-homewizard-instant` as a HACS custom repository (Integration), or copy `custom_components/homewizard_instant` into your Home Assistant config directory.
 2. Restart Home Assistant, then add **HomeWizard Instant** under Settings → Devices & services.
-3. Enter the P1 meter's local IP address. When prompted, press its button and submit within 30 seconds. If the window expires, submit to reopen it, then press and submit again.
+3. Enter the meter's local IP address. When prompted, press its button and submit within 30 seconds. On a kWh meter, hold the Wi-Fi pair button for 1 to 3 seconds. If the window expires, submit to reopen it, then press and submit again.
 
 ## Upgrading from the original
 
@@ -26,7 +26,7 @@ The existing sensor descriptions and official Python client models preserve powe
 
 ## Troubleshooting
 
-- Pairing fails: reopen the window and press the physical button before submitting.
+- Pairing fails: reopen the window and press the physical button before submitting. kWh meters only accept a 1 to 3 second press of the Wi-Fi pair button.
 - Unavailable: check firmware WebSocket support and local HTTPS/WSS reachability on port 443.
 - IP changed: discovery updates known devices, or use Reconfigure to enter the new address.
 - Token revoked: complete the reauthentication prompt.
@@ -42,7 +42,7 @@ python -m mypy --strict custom_components/homewizard_instant
 pytest tests -v
 ```
 
-Automated tests use mocked devices; physical P1 validation is still required before relying on this fork for live automations.
+Automated tests use mocked devices; physical P1 and kWh meter validation is still required before relying on this fork for live automations.
 
 ## References
 
