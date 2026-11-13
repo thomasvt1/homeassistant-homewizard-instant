@@ -187,6 +187,25 @@ PYTHONPATH=tools python3 -m mock_device --serial aabbccddeeff --https-port 443 -
 
 Set `HOMEWIZARD_DEV_CA=/tmp/hw-ca/ca.pem` in the Home Assistant environment if you are not using the compose file.
 
+## Capture a physical meter's frames
+
+`tools/dev/capture_frames.py` talks to a real meter on your network, without Home Assistant or the lab. It records what the meter sends on the same `device`, `measurement` and `system` topics the integration subscribes to. Use it when a meter behaves differently from the emulator, for example a kWh meter that goes quiet while its readings are steady.
+
+```sh
+python3 tools/dev/capture_frames.py 192.168.1.50 --minutes 10
+```
+
+The script pairs a temporary local user: press the meter's button when asked (on a kWh meter, hold the Wi-Fi pair button for 1 to 3 seconds). It deletes that user again at the end unless `--keep-user` is given. Pass `--token` (or set `HOMEWIZARD_TOKEN`) to reuse a token instead of pairing. `--ca-file` adds a CA, for the lab's emulated meters.
+
+Every frame goes to a JSON Lines file (`--out`, default `homewizard-frames-<time>.jsonl`) as it arrives, with serials, meter identifiers and the Wi-Fi SSID redacted. At the end the script prints a summary:
+
+- `interval_s` and `longest_silence_s`: how often measurements arrive, and the longest stretch without one, counting the start and end of the recording.
+- `stale_watchdog_would_trip`: whether that silence reaches the integration's `STALE_AFTER` (60 s).
+- `distinct_field_sets`, `fields_always` and `fields_sometimes`: whether every frame is a full snapshot or some carry only part of the fields.
+- `fields_null` and `repeated_frames`: fields sent as null, and frames identical to the previous one.
+
+`--summarize FILE` prints the summary for an earlier capture, including one that was stopped with Ctrl+C.
+
 ## Checks
 
 ```bash
