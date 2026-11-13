@@ -3,7 +3,9 @@ rules:
   action-setup:
     status: exempt
     comment: Integration does not register actions
-  appropriate-polling: done
+  appropriate-polling:
+    status: exempt
+    comment: Push-based; the meter sends updates over a WebSocket.
   brands: done
   common-modules: done
   config-flow-test-coverage: done
@@ -58,14 +60,16 @@ rules:
   exception-translations: done
   icon-translations: done
   reconfiguration-flow: done
-  repair-issues: done
-  stale-devices:
+  repair-issues:
     status: exempt
-    comment: Local device integration does not manage stale device cleanup.
+    comment: Token problems use reauthentication; there is nothing else to repair.
+  stale-devices:
+    status: done
+    comment: >-
+      External meters the P1 meter no longer reports can be deleted from the
+      device page; the P1 meter itself and reported meters cannot.
 
   # Platinum
   async-dependency: done
   inject-websession: done
-  strict-typing:
-    status: exempt
-    comment: Strict typing is not enforced for this custom integration.
+  strict-typing: done

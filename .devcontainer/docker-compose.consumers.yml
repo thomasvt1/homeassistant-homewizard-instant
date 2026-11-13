@@ -1,0 +1,51 @@
+# Optional lab pieces for the v2 workstream. They are not started by
+# `docker compose up` on docker-compose.yml alone.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.consumers.yml up -d
+#
+# Venus E 3.0 Control 151 is the image built from taurgis/has-marstek-local-api
+# (Renode, unmodified firmware). Build it in that clone; do not copy the blobs
+# into this repository:
+#
+#   docker build -f tools/firmware_emulator/Dockerfile -t marstek-fw-emulator:local .
+#
+# The OmniBattery loop with the Python Modbus model is docker-compose.omnibattery.yml.
+
+services:
+  homeassistant:
+    volumes:
+      - ${MARSTEK_REPO:?set MARSTEK_REPO}/custom_components/marstek:/config/custom_components/marstek:ro
+
+  venus-e3-151:
+    image: ${MARSTEK_FW_IMAGE:-marstek-fw-emulator:local}
+    init: true
+    stop_grace_period: 20s
+    networks:
+      lab:
+        ipv4_address: 172.30.28.20
+    volumes:
+      - venus_e3_151:/state
+    command:
+      - --firmware
+      - VNSE3-0:151
+      - --ble-mac
+      - "02:e0:00:00:00:70"
+      - --wifi-mac
+      - "02:e1:00:00:00:70"
+      - --soc
+      - "62"
+      - --mips
+      - "40"
+
+  venus-e3-151-ct:
+    image: ghcr.io/tomquist/astrameter:2.3.1@sha256:72329da6a63704fb68be7668c494640639c9b28cfbf3bae7588ac1f13a36fb0e
+    network_mode: service:venus-e3-151
+    depends_on:
+      venus-e3-151:
+        condition: service_healthy
+    volumes:
+      - ${MARSTEK_REPO}/tools/firmware_emulator/astrameter/config.ini:/app/config.ini:ro
+    restart: on-failure
+
+volumes:
+  venus_e3_151:

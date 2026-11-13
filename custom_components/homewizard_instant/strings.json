@@ -4,17 +4,21 @@
       "already_configured": "Device is already configured",
       "device_not_supported": "This device is not supported. Only P1 meters and kWh meters are supported.",
       "invalid_discovery_parameters": "Invalid discovery parameters",
-      "reauth_enable_api_successful": "Enabling API was successful",
       "reconfigure_successful": "Reconfigure successful",
       "unknown_error": "Unexpected error",
-      "wrong_device": "The configured device is not the same found on this IP address.",
-      "reauth_successful": "Pairing successful"
+      "wrong_device": "The device at this IP address is not the configured meter.",
+      "reauth_successful": "Pairing successful",
+      "unknown_device": "This device is not set up in HomeWizard Instant.",
+      "already_in_progress": "Setup of this meter is already in progress."
     },
     "error": {
       "network_error": "Device unreachable, make sure that you have entered the correct IP address and that the device is available in your network",
-      "authorization_failed": "Press the device button (1 to 3 seconds on a kWh meter) and submit within 30 seconds.",
+      "authorization_failed": "Press the device button and submit within 30 seconds.",
       "invalid_auth": "The token was rejected. Pair the device again.",
-      "unsupported_api_version": "This device requires firmware supporting API v2 and WebSockets."
+      "unsupported_api_version": "This device requires firmware supporting API v2 and WebSockets.",
+      "unknown": "Unexpected error. Check the Home Assistant logs for details.",
+      "wrong_device": "The device at this IP address is not the configured meter.",
+      "invalid_response": "The device sent an unexpected response. Try again."
     },
     "step": {
       "discovery_confirm": {
@@ -42,16 +46,25 @@
       },
       "authorize": {
         "title": "Pair with API v2",
-        "description": "Press the button on the device at {ip_address} (on a kWh meter, hold the Wi-Fi pair button for 1 to 3 seconds), then select Submit within 30 seconds. If pairing expires, submit once to reopen the window, press the button, then submit again."
+        "description": "Press the button on the meter at {ip_address} (on a kWh meter, hold the Wi-Fi pair button for 1 to 3 seconds), then select Submit within 30 seconds. If pairing expires, submit once to reopen the window, press the button, then submit again."
       }
     }
   },
   "exceptions": {
     "communication_error": {
-      "message": "Failed to communicate with the device. Check the IP address and network connectivity."
+      "message": "Failed to communicate with the device: {error}"
     },
-    "api_disabled": {
-      "message": "The local API is disabled. Enable it in the HomeWizard app and try again."
+    "pairing_required": {
+      "message": "Pair this meter with the local API v2 by pressing its button during reauthentication."
+    },
+    "reconnecting": {
+      "message": "Waiting for the connection to the meter to recover."
+    },
+    "stale_data": {
+      "message": "The meter sent no measurements for {seconds} seconds. For a P1 meter, check the cable to the smart meter."
+    },
+    "token_rejected": {
+      "message": "The meter rejected the API token. Reauthenticate to pair it again."
     }
   },
   "issues": {},
@@ -130,19 +143,19 @@
         "name": "Wi-Fi strength"
       },
       "gas_meter": {
-        "name": "Gas meter"
+        "name": "Total gas"
       },
       "heat_meter": {
-        "name": "Heat meter"
+        "name": "Total heat energy"
       },
       "warm_water_meter": {
-        "name": "Warm water meter"
+        "name": "Total warm water"
       },
       "water_meter": {
-        "name": "Water meter"
+        "name": "Total water"
       },
       "inlet_heat_meter": {
-        "name": "Inlet heat meter"
+        "name": "Total inlet heat energy"
       }
     }
   }
