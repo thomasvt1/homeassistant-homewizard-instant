@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp import ClientSession
@@ -89,8 +90,31 @@ def test_summarize_an_earlier_capture(tmp_path: Path, capsys) -> None:
     )
     assert capture_frames.main(["--summarize", str(path)]) == 0
     summary = json.loads(capsys.readouterr().out)
+    # No END marker: the file only lasts until its last frame.
     assert summary["duration_s"] == 2.5
     assert summary["measurement"]["repeated_frames"] == 2
+
+
+def test_summarize_keeps_trailing_silence_from_the_end_marker(tmp_path: Path) -> None:
+    path = tmp_path / "frames.jsonl"
+    lines = [reading(t, power_w=0) for t in (0.5, 1.5)]
+    lines.append({"t": 75.0, "type": capture_frames.END, "data": None})
+    path.write_text("\n".join(json.dumps(line) for line in lines), encoding="utf-8")
+    summary = capture_frames.summarize(*capture_frames.load(path))
+    assert summary["duration_s"] == 75.0
+    assert summary["frames"] == {"measurement": 2}
+    assert summary["measurement"]["longest_silence_s"] == 73.5
+    assert summary["measurement"]["stale_watchdog_would_trip"] is True
+
+
+async def test_cancelled_capture_still_writes_the_end_marker() -> None:
+    socket = AsyncMock()
+    socket.receive.side_effect = asyncio.CancelledError
+    clock = iter([10.0, 10.0, 52.5]).__next__
+    written: list[dict[str, object]] = []
+    with pytest.raises(asyncio.CancelledError):
+        await capture_frames.record(socket, 600, written.append, clock=clock)
+    assert written == [{"t": 42.5, "type": capture_frames.END, "data": None}]
 
 
 def test_host_is_required_without_summarize() -> None:
@@ -122,6 +146,7 @@ async def test_pair_record_and_unpair_against_the_mock_meter(tmp_path: Path) -> 
             await socket.close()
         assert written == frames
         assert duration >= 0.4
+        assert frames[-1] == {"t": duration, "type": capture_frames.END, "data": None}
         kinds = {frame["type"] for frame in frames}
         assert {"device", "measurement", "system"} <= kinds
         device = next(frame for frame in frames if frame["type"] == "device")

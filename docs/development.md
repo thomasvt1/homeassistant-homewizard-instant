@@ -195,7 +195,7 @@ Set `HOMEWIZARD_DEV_CA=/tmp/hw-ca/ca.pem` in the Home Assistant environment if y
 python3 tools/dev/capture_frames.py 192.168.1.50 --minutes 10
 ```
 
-The script pairs a temporary local user: press the meter's button when asked (on a kWh meter, hold the Wi-Fi pair button for 1 to 3 seconds). It deletes that user again at the end unless `--keep-user` is given. Pass `--token` (or set `HOMEWIZARD_TOKEN`) to reuse a token instead of pairing. `--ca-file` adds a CA, for the lab's emulated meters.
+The script pairs a temporary local user: press the meter's button when asked (on a kWh meter, hold the Wi-Fi pair button for 1 to 3 seconds). It waits 60 s for the press (`--pair-timeout` changes that) and deletes the user again at the end unless `--keep-user` is given. Pass `--token` (or set `HOMEWIZARD_TOKEN`) to reuse a token instead of pairing. `--ca-file` adds a CA, for the lab's emulated meters.
 
 Every frame goes to a JSON Lines file (`--out`, default `homewizard-frames-<time>.jsonl`) as it arrives, with serials, meter identifiers and the Wi-Fi SSID redacted. At the end the script prints a summary:
 
@@ -204,7 +204,7 @@ Every frame goes to a JSON Lines file (`--out`, default `homewizard-frames-<time
 - `distinct_field_sets`, `fields_always` and `fields_sometimes`: whether every frame is a full snapshot or some carry only part of the fields.
 - `fields_null` and `repeated_frames`: fields sent as null, and frames identical to the previous one.
 
-`--summarize FILE` prints the summary for an earlier capture, including one that was stopped with Ctrl+C.
+The file ends with an `<end>` line holding the time the recording stopped, also after Ctrl+C, so `--summarize FILE` can print the summary for an earlier capture including the silence after its last measurement.
 
 ## Checks
 

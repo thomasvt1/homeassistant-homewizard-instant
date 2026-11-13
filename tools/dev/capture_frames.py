@@ -36,6 +36,8 @@ from homewizard_energy.v2.cacert import CACERT
 from yarl import URL
 
 TOPICS = ("device", "measurement", "system")
+# Written last, with the elapsed time at which the recording stopped.
+END = "<end>"
 REDACTED = "**REDACTED**"
 REDACT_KEYS = frozenset({"id", "serial", "token", "unique_id", "wifi_ssid"})
 # Matches STALE_AFTER in custom_components/homewizard_instant/const.py.
@@ -175,34 +177,45 @@ async def record(
     sink: Callable[[Frame], None],
     clock: Callable[[], float] = time.monotonic,
 ) -> tuple[list[Frame], float]:
-    """Collect redacted frames until the time is up or the meter closes."""
+    """Collect redacted frames until the time is up or the meter closes.
+
+    The last frame is always an END marker holding the elapsed time, also when
+    the capture is cancelled, so a summary of the file still counts the
+    silence after the final measurement.
+    """
     start = clock()
     frames: list[Frame] = []
-    while (remaining := start + seconds - clock()) > 0:
-        try:
-            message = await asyncio.wait_for(socket.receive(), remaining)
-        except TimeoutError:
-            break
-        elapsed = round(clock() - start, 3)
-        if message.type == aiohttp.WSMsgType.TEXT:
+    try:
+        while (remaining := start + seconds - clock()) > 0:
             try:
-                payload: Any = json.loads(message.data)
-            except ValueError:
-                payload = {"type": "<invalid json>", "data": message.data[:200]}
-            if not isinstance(payload, dict):
-                payload = {"type": "<not an object>", "data": payload}
-            frame = {
-                "t": elapsed,
-                "type": str(payload.get("type")),
-                "data": redact(payload.get("data")),
-            }
-        else:
-            frame = {"t": elapsed, "type": f"<{message.type.name}>", "data": None}
-        frames.append(frame)
-        sink(frame)
-        if message.type in _STOP:
-            break
-    return frames, round(clock() - start, 3)
+                message = await asyncio.wait_for(socket.receive(), remaining)
+            except TimeoutError:
+                break
+            elapsed = round(clock() - start, 3)
+            if message.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    payload: Any = json.loads(message.data)
+                except ValueError:
+                    payload = {"type": "<invalid json>", "data": message.data[:200]}
+                if not isinstance(payload, dict):
+                    payload = {"type": "<not an object>", "data": payload}
+                frame = {
+                    "t": elapsed,
+                    "type": str(payload.get("type")),
+                    "data": redact(payload.get("data")),
+                }
+            else:
+                frame = {"t": elapsed, "type": f"<{message.type.name}>", "data": None}
+            frames.append(frame)
+            sink(frame)
+            if message.type in _STOP:
+                break
+    finally:
+        duration = round(clock() - start, 3)
+        end: Frame = {"t": duration, "type": END, "data": None}
+        frames.append(end)
+        sink(end)
+    return frames, duration
 
 
 def _round(value: float) -> float:
@@ -226,7 +239,9 @@ def summarize(frames: Iterable[Frame], duration: float) -> dict[str, Any]:
     longest = max(silences)
     return {
         "duration_s": _round(duration),
-        "frames": dict(Counter(frame["type"] for frame in frames)),
+        "frames": dict(
+            Counter(frame["type"] for frame in frames if frame["type"] != END)
+        ),
         "measurement": {
             "count": len(readings),
             "interval_s": (
@@ -261,12 +276,19 @@ def summarize(frames: Iterable[Frame], duration: float) -> dict[str, Any]:
 
 
 def load(path: Path) -> tuple[list[Frame], float]:
-    """Read frames written by an earlier capture."""
+    """Read frames written by an earlier capture.
+
+    The END marker gives the real stop time. A file without one (the process
+    was killed) only lasts until its last frame, so trailing silence is lost.
+    """
     frames = [
         json.loads(line)
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    ends = [frame["t"] for frame in frames if frame["type"] == END]
+    if ends:
+        return frames, ends[-1]
     return frames, max((frame["t"] for frame in frames), default=0.0)
 
 
@@ -284,7 +306,13 @@ async def capture(args: argparse.Namespace) -> dict[str, Any]:
     async with aiohttp.ClientSession() as session:
         paired = token is None
         if token is None:
-            token = await pair(session, base, f"capture-{secrets.token_hex(3)}", tls)
+            token = await pair(
+                session,
+                base,
+                f"capture-{secrets.token_hex(3)}",
+                tls,
+                timeout=args.pair_timeout,
+            )
         try:
             socket = await open_stream(session, base, token, tls)
             print(f"Recording for {args.minutes:g} min to {path}", flush=True)
@@ -328,6 +356,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--keep-user", action="store_true", help="keep the user the script paired"
+    )
+    parser.add_argument(
+        "--pair-timeout",
+        type=float,
+        default=PAIR_TIMEOUT_S,
+        help="seconds to wait for the button press (default: %(default)g)",
     )
     parser.add_argument(
         "--ca-file", help="extra CA to trust, for the lab's emulated meters"
