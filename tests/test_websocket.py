@@ -147,3 +147,48 @@ async def test_wrong_identity():
     with pytest.raises(RequestError):
         await api.connect()
     socket.close.assert_awaited_once()
+
+
+async def test_kwh_meter_snapshot():
+    """kWh meters verify the energymeter identity and parse per-phase fields."""
+    device = {**DEVICE, "product_type": "HWE-KWH3", "product_name": "kWh meter"}
+    socket = AsyncMock()
+    socket.receive.side_effect = [
+        frame("authorization_requested", {"api_version": "2.0.0"}),
+        frame("authorized"),
+        frame("device", device),
+        frame("system", {"wifi_rssi_db": -60}),
+        frame(
+            "measurement",
+            {
+                "energy_import_kwh": 12.5,
+                "energy_export_kwh": 1.5,
+                "power_w": 600,
+                "power_l1_w": 100,
+                "power_l2_w": 200,
+                "power_l3_w": 300,
+                "voltage_l1_v": 230.1,
+                "current_l2_a": 0.9,
+                "power_factor_l3": 0.95,
+                "frequency_hz": 50,
+            },
+        ),
+    ]
+    session = Mock()
+    session.ws_connect = AsyncMock(return_value=socket)
+    api = HomeWizardWebSocket(
+        session,
+        "192.168.1.3",
+        "secret",
+        "appliance/energymeter/aabbccddeeff",
+        create_ssl_context(),
+    )
+    data = await api.connect()
+    assert data.device.model_name == "kWh Meter 3-phase"
+    assert data.measurement.power_l3_w == 300
+    assert data.measurement.voltage_l1_v == 230.1
+    assert data.measurement.power_factor_l3 == 0.95
+    assert data.measurement.tariff is None
+    kwargs = session.ws_connect.call_args.kwargs
+    assert kwargs["server_hostname"] == "appliance/energymeter/aabbccddeeff"
+    await api.close()

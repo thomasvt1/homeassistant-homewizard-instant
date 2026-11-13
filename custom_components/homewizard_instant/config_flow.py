@@ -15,7 +15,6 @@ from homeassistant.helpers import instance_id
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import TextSelector
 from homewizard_energy import HomeWizardEnergyV2
-from homewizard_energy.const import Model
 from homewizard_energy.errors import (
     DisabledError,
     NotFoundError,
@@ -25,11 +24,17 @@ from homewizard_energy.errors import (
 )
 from homewizard_energy.models import Device
 
-from .const import CONF_PRODUCT_NAME, CONF_PRODUCT_TYPE, CONF_SERIAL, DOMAIN
+from .const import (
+    CONF_PRODUCT_NAME,
+    CONF_PRODUCT_TYPE,
+    CONF_SERIAL,
+    DOMAIN,
+    SUPPORTED_MODELS,
+)
 
 
 class HomeWizardConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Configure a P1 meter without falling back to API v1."""
+    """Configure a P1 or kWh meter without falling back to API v1."""
 
     VERSION = 1
     ip_address: str | None = None
@@ -70,7 +75,7 @@ class HomeWizardConfigFlow(ConfigFlow, domain=DOMAIN):
                 device = await async_try_connect(
                     self.hass, self.ip_address, token=self._token
                 )
-                if device.product_type != Model.P1_METER:
+                if device.product_type not in SUPPORTED_MODELS:
                     return self.async_abort(reason="device_not_supported")
                 if not device.serial:
                     return self.async_abort(reason="unknown_error")
@@ -103,14 +108,14 @@ class HomeWizardConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_zeroconf(self, discovery_info: Any) -> ConfigFlowResult:
-        """Discover supported P1 meters and update existing hosts."""
+        """Discover supported P1 and kWh meters and update existing hosts."""
         properties = discovery_info.properties
         if not all(
             key in properties
             for key in (CONF_PRODUCT_NAME, CONF_PRODUCT_TYPE, CONF_SERIAL)
         ):
             return self.async_abort(reason="invalid_discovery_parameters")
-        if properties[CONF_PRODUCT_TYPE] != Model.P1_METER:
+        if properties[CONF_PRODUCT_TYPE] not in SUPPORTED_MODELS:
             return self.async_abort(reason="device_not_supported")
         self.ip_address = discovery_info.host
         self.product_name = properties[CONF_PRODUCT_NAME]
@@ -139,9 +144,9 @@ class HomeWizardConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_dhcp(self, discovery_info: Any) -> ConfigFlowResult:
         """Update a known meter's IP without making unauthenticated v1 requests."""
         serial = discovery_info.macaddress.replace(":", "").replace("-", "").lower()
+        expected = {f"{DOMAIN}_{model}_{serial}".lower() for model in SUPPORTED_MODELS}
         for entry in self._async_current_entries():
-            expected = f"{DOMAIN}_{Model.P1_METER}_{serial}"
-            if entry.unique_id and entry.unique_id.lower() == expected.lower():
+            if entry.unique_id and entry.unique_id.lower() in expected:
                 await self.async_set_unique_id(entry.unique_id)
                 self._abort_if_unique_id_configured(
                     updates={CONF_IP_ADDRESS: discovery_info.ip}
