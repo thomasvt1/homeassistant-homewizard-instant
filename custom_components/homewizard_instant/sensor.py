@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Final, cast
+from functools import partial
+from typing import Final, cast
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -15,7 +16,6 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.components.sensor.const import DEVICE_CLASS_UNITS
 from homeassistant.const import (
-    ATTR_VIA_DEVICE,
     PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS,
     EntityCategory,
@@ -28,28 +28,17 @@ from homeassistant.const import (
     UnitOfReactivePower,
     UnitOfVolume,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from homeassistant.util.dt import utcnow
-from homeassistant.util.variance import ignore_variance
 from homewizard_energy.models import CombinedModels, ExternalDevice, System
-
-if TYPE_CHECKING:
-    from homeassistant.helpers.entity_platform import (
-        AddEntitiesCallback as AddConfigEntryEntitiesCallback,
-    )
-else:
-    try:
-        from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-    except ImportError:  # pragma: no cover - fallback for older HA versions
-        from homeassistant.helpers.entity_platform import (
-            AddEntitiesCallback as AddConfigEntryEntitiesCallback,
-        )
 
 from .const import DOMAIN
 from .coordinator import HomeWizardConfigEntry, HWEnergyDeviceUpdateCoordinator
-from .entity import HomeWizardEntity
+from .entity import HomeWizardEntity, Topic, p1_device_info
 
 SENSOR_DEVICE_CLASS_UNITS = cast(
     "dict[SensorDeviceClass, set[str]]",
@@ -66,6 +55,9 @@ class HomeWizardSensorEntityDescription(SensorEntityDescription):
     enabled_fn: Callable[[CombinedModels], bool] = lambda x: True
     has_fn: Callable[[CombinedModels], bool]
     value_fn: Callable[[CombinedModels], StateType | datetime]
+    # The topic value_fn reads. The entity reports only when that topic brings
+    # a new frame, so a system reply does not refresh a power reading.
+    topic: Topic = "measurement"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -86,7 +78,9 @@ def uptime_to_datetime(value: int) -> datetime:
     return utcnow().replace(microsecond=0) - timedelta(seconds=value)
 
 
-uptime_to_stable_datetime = ignore_variance(uptime_to_datetime, timedelta(minutes=5))
+# The meter answers a system read once a minute; HA keeps the boot time
+# while successive estimates stay within this window.
+_UPTIME_DRIFT_TOLERANCE = 300
 
 SENSORS: Final[tuple[HomeWizardSensorEntityDescription, ...]] = (
     HomeWizardSensorEntityDescription(
@@ -113,6 +107,7 @@ SENSORS: Final[tuple[HomeWizardSensorEntityDescription, ...]] = (
     HomeWizardSensorEntityDescription(
         key="wifi_ssid",
         translation_key="wifi_ssid",
+        topic="system",
         entity_category=EntityCategory.DIAGNOSTIC,
         has_fn=(
             lambda data: data.system is not None and data.system.wifi_ssid is not None
@@ -138,6 +133,7 @@ SENSORS: Final[tuple[HomeWizardSensorEntityDescription, ...]] = (
     HomeWizardSensorEntityDescription(
         key="wifi_strength",
         translation_key="wifi_strength",
+        topic="system",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -156,6 +152,7 @@ SENSORS: Final[tuple[HomeWizardSensorEntityDescription, ...]] = (
     HomeWizardSensorEntityDescription(
         key="wifi_rssi",
         translation_key="wifi_rssi",
+        topic="system",
         native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -622,7 +619,8 @@ SENSORS: Final[tuple[HomeWizardSensorEntityDescription, ...]] = (
     HomeWizardSensorEntityDescription(
         key="uptime",
         translation_key="uptime",
-        device_class=SensorDeviceClass.TIMESTAMP,
+        topic="system",
+        device_class=SensorDeviceClass.UPTIME,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         has_fn=(
@@ -630,7 +628,7 @@ SENSORS: Final[tuple[HomeWizardSensorEntityDescription, ...]] = (
         ),
         value_fn=(
             lambda data: (
-                uptime_to_stable_datetime(data.system.uptime_s)
+                uptime_to_datetime(data.system.uptime_s)
                 if data.system is not None and data.system.uptime_s is not None
                 else None
             )
@@ -638,6 +636,13 @@ SENSORS: Final[tuple[HomeWizardSensorEntityDescription, ...]] = (
     ),
 )
 
+
+# The API reports units in ASCII; Home Assistant expects its own spelling.
+_EXTERNAL_UNITS: Final[dict[str, str]] = {
+    "m3": UnitOfVolume.CUBIC_METERS,
+    "l": UnitOfVolume.LITERS,
+    "L": UnitOfVolume.LITERS,
+}
 
 EXTERNAL_SENSORS = {
     ExternalDevice.DeviceType.GAS_METER: HomeWizardExternalSensorEntityDescription(
@@ -683,30 +688,49 @@ async def async_setup_entry(
     entry: HomeWizardConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Initialize sensors."""
+    """Initialize sensors and add those whose data appears later."""
+    coordinator = entry.runtime_data
+    p1 = coordinator.data.device
+    parent = None
+    if p1.serial is not None:
+        # External meters link to the P1 by registry id, so it must exist first.
+        parent = dr.async_get(hass).async_get_or_create(
+            config_entry_id=entry.entry_id, **p1_device_info(p1)
+        )
+    parent_id = parent.id if parent is not None else None
+    known_sensors: set[str] = set()
+    known_external: set[str] = set()
 
-    # Initialize default sensors
-    entities: list[SensorEntity] = [
-        HomeWizardSensorEntity(entry.runtime_data, description)
-        for description in SENSORS
-        if description.has_fn(entry.runtime_data.data)
-    ]
-
-    # Initialize external devices (gas meters, water meters connected to P1)
-    measurement = entry.runtime_data.data.measurement
-    if measurement.external_devices is not None:
-        for unique_id, device in measurement.external_devices.items():
-            if device.type is not None and (
-                description := EXTERNAL_SENSORS.get(device.type)
-            ):
-                # Add external device
-                entities.append(
-                    HomeWizardExternalSensorEntity(
-                        entry.runtime_data, description, unique_id
-                    )
+    @callback
+    def _new_entities() -> list[SensorEntity]:
+        data = coordinator.data
+        fresh: list[SensorEntity] = []
+        for description in SENSORS:
+            if description.key not in known_sensors and description.has_fn(data):
+                known_sensors.add(description.key)
+                fresh.append(HomeWizardSensorEntity(coordinator, description))
+        for unique_id, device in (data.measurement.external_devices or {}).items():
+            if unique_id in known_external or device.type is None:
+                continue
+            if external := EXTERNAL_SENSORS.get(device.type):
+                known_external.add(unique_id)
+                entity = HomeWizardExternalSensorEntity(
+                    coordinator, external, unique_id, parent_id
                 )
+                # A meter whose device the user deleted gets entities again
+                # when the P1 meter reports it later.
+                entity.async_on_remove(partial(known_external.discard, unique_id))
+                fresh.append(entity)
+        return fresh
 
-    async_add_entities(entities)
+    @callback
+    def _add_new_entities() -> None:
+        """Create entities for fields and meters that appear after setup."""
+        if coordinator.last_update_success and (fresh := _new_entities()):
+            async_add_entities(fresh)
+
+    entry.async_on_unload(coordinator.async_add_listener(_add_new_entities))
+    async_add_entities(_new_entities())
 
 
 class HomeWizardSensorEntity(HomeWizardEntity, SensorEntity):
@@ -722,33 +746,51 @@ class HomeWizardSensorEntity(HomeWizardEntity, SensorEntity):
         """Initialize Sensor Domain."""
         super().__init__(coordinator)
         self.entity_description = description
+        self._topic = description.topic
         self._uptime_system: System | None = None
         self._uptime_value: StateType | datetime | None = None
         if description.key == "uptime":
+            self._attr_uptime_drift_tolerance = _UPTIME_DRIFT_TOLERANCE
             self._uptime_system = coordinator.data.system
             self._uptime_value = description.value_fn(coordinator.data)
         self._attr_unique_id = f"{coordinator.config_entry.unique_id}_{description.key}"
         if not description.enabled_fn(self.coordinator.data):
             self._attr_entity_registry_enabled_default = False
 
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Refresh the cached boot time before writing state."""
+        if self.entity_description.key == "uptime":
+            self._refresh_uptime()
+        super()._handle_coordinator_update()
+
+    def _refresh_uptime(self) -> None:
+        """Recompute boot time only when a new system snapshot arrives.
+
+        Measurement pushes reuse the system snapshot. Its uptime must not be
+        interpreted relative to a later wall clock on every push.
+        """
+        if self.coordinator.data.system is self._uptime_system:
+            return
+        self._uptime_system = self.coordinator.data.system
+        self._uptime_value = self.entity_description.value_fn(self.coordinator.data)
+
     @property
     def native_value(self) -> StateType | datetime | None:
         """Return the sensor value."""
         if self.entity_description.key == "uptime":
-            # Measurement pushes reuse the system snapshot. Its uptime must not
-            # be interpreted relative to a later wall clock on every push.
-            if self.coordinator.data.system is not self._uptime_system:
-                self._uptime_system = self.coordinator.data.system
-                self._uptime_value = self.entity_description.value_fn(
-                    self.coordinator.data
-                )
             return self._uptime_value
         return self.entity_description.value_fn(self.coordinator.data)
 
     @property
     def available(self) -> bool:
         """Return availability of meter."""
-        return super().available and self.native_value is not None
+        if not super().available:
+            return False
+        if self.entity_description.key == "uptime":
+            system = self.coordinator.data.system
+            return system is not None and system.uptime_s is not None
+        return self.entity_description.value_fn(self.coordinator.data) is not None
 
 
 class HomeWizardExternalSensorEntity(HomeWizardEntity, SensorEntity):
@@ -759,6 +801,7 @@ class HomeWizardExternalSensorEntity(HomeWizardEntity, SensorEntity):
         coordinator: HWEnergyDeviceUpdateCoordinator,
         description: HomeWizardExternalSensorEntityDescription,
         device_unique_id: str,
+        via_device_id: str | None = None,
     ) -> None:
         """Initialize Externally connected HomeWizard Sensors."""
         super().__init__(coordinator)
@@ -770,14 +813,10 @@ class HomeWizardExternalSensorEntity(HomeWizardEntity, SensorEntity):
             identifiers={(DOMAIN, f"{DOMAIN}_{device_unique_id}")},
             name=description.device_name,
             manufacturer="HomeWizard",
-            model=coordinator.data.device.product_type,
             serial_number=device_unique_id,
         )
-        if coordinator.data.device.serial is not None:
-            self._attr_device_info[ATTR_VIA_DEVICE] = (
-                DOMAIN,
-                f"{DOMAIN}_{coordinator.data.device.serial}",
-            )
+        if via_device_id is not None:
+            self._attr_device_info["via_device_id"] = via_device_id
 
     @property
     def native_value(self) -> float | int | str | None:
@@ -804,11 +843,7 @@ class HomeWizardExternalSensorEntity(HomeWizardEntity, SensorEntity):
         if (device := self.device) is None:
             return None
 
-        # API returns 'm3' but we expect m³
-        if device.unit == "m3":
-            return UnitOfVolume.CUBIC_METERS
-
-        return device.unit
+        return _EXTERNAL_UNITS.get(device.unit, device.unit)
 
     @property
     def device_class(self) -> SensorDeviceClass | None:

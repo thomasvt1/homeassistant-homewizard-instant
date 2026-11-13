@@ -1,9 +1,7 @@
 {
   "domain": "homewizard_instant",
   "name": "HomeWizard Instant",
-  "codeowners": [
-    "@thomasvt1"
-  ],
+  "codeowners": ["@thomasvt1"],
   "config_flow": true,
   "dhcp": [
     {
@@ -14,15 +12,8 @@
   "integration_type": "device",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/thomasvt1/homeassistant-homewizard-instant/issues",
-  "loggers": [
-    "homewizard_instant"
-  ],
-  "requirements": [
-    "python-homewizard-energy>=10.2.0"
-  ],
+  "loggers": ["homewizard_energy"],
+  "requirements": ["python-homewizard-energy>=10.2.0"],
   "version": "2.0.0",
-  "zeroconf": [
-    "_hwenergy._tcp.local.",
-    "_homewizard._tcp.local."
-  ]
+  "zeroconf": ["_hwenergy._tcp.local.", "_homewizard._tcp.local."]
 }

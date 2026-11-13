@@ -1,52 +1,113 @@
 # HomeWizard Instant — API v2 WebSocket fork
 
-A fork of [taurgis/homeassistant-homewizard-instant](https://github.com/taurgis/homeassistant-homewizard-instant) for HomeWizard **P1 meters** and **DIN-rail kWh meters** (HWE-KWH1, HWE-KWH3, SDM230-wifi, SDM630-wifi), using authenticated API v2 WebSocket push updates. Requires Home Assistant 2025.10 or newer and device firmware supporting `/api/ws`.
+A fork of [taurgis/homeassistant-homewizard-instant](https://github.com/taurgis/homeassistant-homewizard-instant) that tracks its `feature/api-v2-websocket` branch.
 
-## Install
+This is a custom integration for **HomeWizard P1 meters** and **DIN-rail kWh meters** that receives real-time measurement updates over the **HomeWizard API v2 WebSocket**.
+
+Home Assistant’s official HomeWizard integration is documented here:
+- https://www.home-assistant.io/integrations/homewizard/
+
+## Why this exists
+
+This integration subscribes to local measurement updates as the P1 meter produces them, without a scheduled polling interval.
+
+Because this integration uses a different domain (`homewizard_instant`), it can run **side-by-side** with the official integration. Both register the meter's MAC address, so Home Assistant shows one device holding the entities of both integrations.
+
+## Installation
+
+### Manual
+
+1. Copy the folder `custom_components/homewizard_instant` into your Home Assistant config folder:
+   - `<config>/custom_components/homewizard_instant`
+2. Restart Home Assistant.
+3. Go to **Settings → Devices & services → Add integration**.
+4. Search for **HomeWizard Instant** and follow the steps.
+
+### HACS
 
 [![Open your Home Assistant instance and add a custom repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=thomasvt1&repository=homeassistant-homewizard-instant&category=integration)
 
-1. Add `https://github.com/thomasvt1/homeassistant-homewizard-instant` as a HACS custom repository (Integration), or copy `custom_components/homewizard_instant` into your Home Assistant config directory.
-2. Restart Home Assistant, then add **HomeWizard Instant** under Settings → Devices & services.
-3. Enter the meter's local IP address. When prompted, press its button and submit within 30 seconds. On a kWh meter, hold the Wi-Fi pair button for 1 to 3 seconds. If the window expires, submit to reopen it, then press and submit again.
+Add `https://github.com/thomasvt1/homeassistant-homewizard-instant` to HACS as a custom repository (category: **Integration**). HACS installs it under `custom_components/homewizard_instant`.
 
-## Upgrading from the original
+## Configuration
 
-Back up your configuration, replace the integration files and restart. Existing entries prompt for API v2 pairing once. Complete that prompt instead of deleting the entry: the domain and entity IDs remain unchanged, preserving history and dashboard references. This fork replaces the original custom integration; both cannot be installed simultaneously under the same domain. The official `homewizard` integration uses a different domain. This fork creates a separate device user so it does not replace the official integration's token.
+This integration is configured via the UI. The only required parameter is:
 
-API v1 and its local-API toggle are not used. Devices without WebSocket support need a firmware update; there is no polling fallback.
+- **IP address**: the local IP address of your HomeWizard P1 meter or kWh meter.
 
-## Updates and recovery
+After entering the IP address, press the device button when prompted and select Submit within 30 seconds. On a kWh meter, hold the Wi-Fi pair button for 1 to 3 seconds. If the pairing window expires, submit to reopen it, then press the button and submit again.
 
-A single TLS-verified `wss://<host>/api/ws` connection authenticates, then subscribes to `device`, `measurement` and `system`. Setup waits for all three initial snapshots. Measurement updates arrive as the meter produces them; WebSockets cannot make the physical smart meter report faster.
+The integration stores a v2 token under a separate local device user and keeps domain-prefixed unique IDs to avoid conflicts with the official integration.
 
-A dropped connection marks entities unavailable and reconnects with backoff from 1 to 60 seconds. A revoked token prompts for pairing again. Unloading cancels the reader and closes its socket. System diagnostics follow device pushes: HomeWizard only guarantees real-time updates for certain system settings, so Wi-Fi and uptime may not refresh continuously.
+### Installation parameters
 
-The existing sensor descriptions and official Python client models preserve power, energy, voltage/current and external gas/water/heat meter mappings. No device-control services are added.
+- **Home Assistant 2026.8 or newer** (the first release that ships `python-homewizard-energy` 10.2.0).
+- Meter firmware supporting **API v2 and `/api/ws`**. The API v1 local-API toggle is not used.
+- The device must be reachable on your local network.
+
+## Data updates
+
+One TLS-verified `wss://<host>/api/ws` connection authenticates and subscribes to `device`, `measurement` and `system`. Setup waits for all three initial snapshots. All entities read from the coordinator data.
+
+Disconnects mark entities unavailable and trigger reconnect attempts with backoff from 1 to 60 seconds; the delay only starts over at 1 second after a connection has stayed up for a minute. If the socket stays up but the meter sends no measurement for 60 seconds (for example when the P1 cable is unplugged from the smart meter), sensors become unavailable until a new measurement arrives; reconnecting does not bring them back on the reading the meter replays. A repeated measurement on the already open socket does count, even when every value is unchanged: entities are written again so Home Assistant refreshes `last_reported` without `force_update` (no extra recorder row, and `last_changed` stays where it is). Only a new measurement does this for measurement sensors: the system read the integration sends once a minute updates the Wi-Fi and uptime sensors and leaves `last_reported` on power alone. A connection that stops answering is closed within about 22 seconds (WebSocket ping after 15 seconds without a frame), and one that answers pings but sends nothing for 90 seconds is reconnected. A field the meter reports as null, malformed or out of range makes only that sensor unavailable; the rest keep updating. Sensors for fields that first appear after setup are added automatically. Revoked tokens start reauthentication. Unloading cancels the reader and closes the socket.
+
+### Grid controllers (OmniBattery)
+
+[OmniBattery](https://github.com/ffunes/Omnibattery) 1.5.0 (documented at [ffunes.github.io/Omnibattery](https://ffunes.github.io/Omnibattery/configuration/main-sensor/)) reads one grid-power sensor. Use **Power** (`sensor.…_power`). The unit is `W`. Positive is import and negative is export, which is OmniBattery's default, so leave **Inverted meter sign** off. It treats `last_reported` as the meter's heartbeat and keeps the latest reading for 65 seconds; an update interval of 10 seconds or more raises a repair. This integration cannot publish faster than the smart meter (about 1 second on DSMR 5, about 10 seconds on DSMR 2–4). A DSMR 2–4 meter therefore stays inside the 65 second limit and can still trip OmniBattery's slow-sensor repair. That is the meter's cadence, not a polling delay.
+
+OmniBattery runs a control cycle when the grid sensor's state changes and uses unchanged reports only to time the meter. Its event-triggered cycles are throttled to one per **PD minimum cycle interval** (1.0 s by default), counted from the last cycle of any kind, including its own 2-second safety timer. With a 1 s DSMR 5 meter, a timer cycle shortly before a telegram makes OmniBattery skip that telegram, so it reacts a second late. For a single Marstek Venus E on Modbus TCP, these two settings did best in the lab (`docs/development.md`), with no OmniBattery changes:
+
+- **PD minimum cycle interval 0.5 s**, so no telegram is skipped after a timer cycle. 0 s cycles on every trigger and roughly doubles both grid error and Modbus writes.
+- **PD Kp 0.7** instead of the `balanced` 0.35. OmniBattery applies Kp per 2 seconds, so 0.35 closes about 17 % of the remaining error per second and a 400 W load step takes about 12 s to cover; 0.7 halves that. Kp 1.0 overshoots and hunts.
+
+Together they cut the avoidable grid import and export in the lab house scenario by about 13 % and made fewer Modbus writes. Keep deadband 40 W and target grid power 0 W: 25 W and -30 W both did worse.
+
+OmniBattery talks to a Marstek battery over Modbus TCP. It does not speak the Venus local API. The lab in `docs/development.md` can put either a Python model of a Venus E 3.0's Modbus registers or the vendor Control 151 firmware (emulated in Renode, serving Modbus itself) behind OmniBattery.
+
+### Upgrading from API v1
+
+Existing entries prompt for one-time v2 pairing after updating and restarting. Complete that prompt without deleting the entry: sensor IDs remain unchanged, preserving history and dashboard references. Devices without WebSocket support require a firmware update; there is no polling fallback.
+
+## Supported devices
+
+- HomeWizard **P1 meters** (HWE-P1).
+- HomeWizard **DIN-rail kWh meters**: HWE-KWH1 and SDM230-wifi (1-phase), HWE-KWH3 and SDM630-wifi (3-phase).
+
+## Supported functions
+
+- Near real-time power and energy sensors (import/export totals and tariffs).
+- Voltage, current, frequency, and power factor sensors (when provided by the device).
+- Device diagnostics (firmware, DSMR version, Wi-Fi details, uptime).
+- External meters connected to the P1 meter (gas, water, heat), when reported by the API. A meter the P1 meter no longer reports can be deleted from its device page.
+
+## Examples
+
+- Use the **Average demand** sensor in dashboards to visualize short-term power usage.
+- Add the **Energy import** sensor to the Energy dashboard for long-term consumption tracking.
 
 ## Troubleshooting
 
-- Pairing fails: reopen the window and press the physical button before submitting. kWh meters only accept a 1 to 3 second press of the Wi-Fi pair button.
-- Unavailable: check firmware WebSocket support and local HTTPS/WSS reachability on port 443.
-- IP changed: discovery updates known devices, or use Reconfigure to enter the new address.
-- Token revoked: complete the reauthentication prompt.
+- **Pairing fails**: Reopen the pairing window, press the device button, then submit within 30 seconds. A kWh meter only accepts a 1 to 3 second press of its Wi-Fi pair button.
+- **Token revoked**: Complete the reauthentication prompt.
+- **Device unreachable**: Confirm the IP address and ensure the device is online.
+- **Discovery not found**: Add the integration manually and provide the IP address.
 
-## Development
+## Known limitations
 
-On Linux with Python 3.13:
+- Measurement frequency is determined by the physical smart meter. WebSockets cannot make it report faster.
+- HomeWizard only pushes some system settings in real time, so the integration reads Wi-Fi signal and uptime once a minute over the open WebSocket.
+- A meter that is already silent when Home Assistant starts shows its last reading for up to 60 seconds before its sensors become unavailable.
+- An energy total of exactly 0 kWh is shown as unknown, like the official HomeWizard integration does, because Home Assistant would otherwise record it as a meter reset.
+- Only P1 meters and kWh meters are supported; other HomeWizard devices (Energy Socket, Watermeter, Plug-In Battery) are not.
+- This integration does not register services or actions.
 
-```sh
-python -m pip install -r requirements_test.txt
-python -m ruff check custom_components/homewizard_instant
-python -m mypy --strict custom_components/homewizard_instant
-pytest tests -v
-```
+## Removal
 
-Automated tests use mocked devices; physical P1 and kWh meter validation is still required before relying on this fork for live automations.
+1. Remove the integration from **Settings → Devices & services**. Home Assistant also deletes its local user from the meter when it is reachable; otherwise remove it in the HomeWizard Energy app.
+2. If installed manually, delete `custom_components/homewizard_instant`.
+3. If installed via HACS, remove the repository from HACS and restart Home Assistant.
 
-## References
+## Notes
 
-- [HomeWizard API v2](https://api-documentation.homewizard.com/docs/category/api-v2/)
-- [WebSocket protocol](https://api-documentation.homewizard.com/docs/v2/websocket/)
-- [Official Home Assistant integration](https://github.com/home-assistant/core/tree/dev/homeassistant/components/homewizard)
-- [hprax WebSocket fork](https://github.com/hprax/homeassistant-homewizard-instant), reviewed as an additional reference
+- Protocol reference: [HomeWizard API v2 WebSocket documentation](https://api-documentation.homewizard.com/docs/v2/websocket/).
+- Only **P1 meters** and **kWh meters** are supported by this integration.

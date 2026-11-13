@@ -1,10 +1,11 @@
 """WebSocket protocol tests with real library model parsing."""
 
 import json
+import logging
 import ssl
 from unittest.mock import AsyncMock, Mock
 import pytest
-from aiohttp import WSMessage, WSMsgType
+from aiohttp import WSMessage, WSMsgType, WSServerHandshakeError
 from homewizard_energy.errors import RequestError, UnauthorizedError
 from custom_components.homewizard_instant.websocket import (
     HomeWizardWebSocket,
@@ -24,7 +25,7 @@ def frame(kind, data=None):
     return WSMessage(WSMsgType.TEXT, json.dumps({"type": kind, "data": data}), None)
 
 
-def client(frames):
+def client(frames, serial: str = "aabbccddeeff"):
     socket = AsyncMock()
     socket.receive.side_effect = frames
     session = Mock()
@@ -33,7 +34,7 @@ def client(frames):
         session,
         "192.168.1.2",
         "secret",
-        "appliance/p1dongle/aabbccddeeff",
+        serial,
         create_ssl_context(),
     )
     return transport, session, socket
@@ -69,7 +70,8 @@ async def test_handshake_and_snapshots():
     assert second.system == first.system
     kwargs = session.ws_connect.call_args.kwargs
     assert kwargs["ssl"].verify_mode == ssl.CERT_REQUIRED
-    assert kwargs["server_hostname"] == "appliance/p1dongle/aabbccddeeff"
+    assert kwargs["ssl"].check_hostname is False
+    assert kwargs.get("server_hostname") is None
     await api.close()
     socket.close.assert_awaited_once()
 
@@ -85,10 +87,24 @@ async def test_handshake_and_snapshots():
             ],
             UnauthorizedError,
         ),
-        ([frame("authorization_requested"), frame("denied")], UnauthorizedError),
+        # Only user:unauthorized means a bad token; other replies must not
+        # start reauthentication.
+        ([frame("authorization_requested"), frame("denied")], RequestError),
         ([WSMessage(WSMsgType.CLOSED, None, None)], RequestError),
-        ([WSMessage(WSMsgType.TEXT, "[]", None)], RequestError),
-        ([WSMessage(WSMsgType.TEXT, "{", None)], ValueError),
+        (
+            [
+                WSMessage(WSMsgType.TEXT, "[]", None),
+                WSMessage(WSMsgType.CLOSED, None, None),
+            ],
+            RequestError,
+        ),
+        (
+            [
+                WSMessage(WSMsgType.TEXT, "{", None),
+                WSMessage(WSMsgType.CLOSED, None, None),
+            ],
+            RequestError,
+        ),
     ],
 )
 async def test_failed_handshake_closes(frames, error):
@@ -109,20 +125,38 @@ async def test_runtime_rejection():
     await api.close()
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        frame("measurement", None),
-        frame("error", {"message": "invalid"}),
-        WSMessage(WSMsgType.CLOSE, None, None),
-    ],
-)
-async def test_bad_update(message):
-    api, _, _ = client(initial() + [message])
+async def test_bad_update():
+    api, _, _ = client(initial() + [WSMessage(WSMsgType.CLOSE, None, None)])
     await api.connect()
     with pytest.raises(RequestError):
         await api.receive()
     await api.close()
+
+
+async def test_request_error_keeps_the_stream(caplog):
+    """An error frame answers one request; it does not end the connection."""
+    api, _, socket = client(initial())
+    await api.connect()
+    socket.receive.side_effect = [
+        frame("error", {"message": "request:unknown"}),
+        frame("error", {"message": "request:unknown"}),
+        frame("measurement", {"power_w": 7}),
+    ]
+    with caplog.at_level(logging.DEBUG):
+        data = await api.receive()
+    assert data.measurement.power_w == 7
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "request:unknown" in warnings[0].getMessage()
+    await api.close()
+
+
+async def test_error_during_handshake_names_the_device_message():
+    api, _, _ = client(
+        [frame("authorization_requested"), frame("error", {"message": "busy"})]
+    )
+    with pytest.raises(RequestError, match="busy"):
+        await api.connect()
 
 
 async def test_reconnect_resets_snapshots():
@@ -140,48 +174,338 @@ async def test_reconnect_resets_snapshots():
     await api.close()
 
 
+async def test_unusable_frames_keep_the_last_snapshot(caplog):
+    api, _, socket = client(initial())
+    first = await api.connect()
+    socket.receive.side_effect = [
+        WSMessage(WSMsgType.TEXT, "{", None),
+        WSMessage(WSMsgType.TEXT, "[]", None),
+        frame("measurement", None),
+        frame("device", {"product_type": "HWE-P1"}),
+        frame("device", {**DEVICE, "serial": None}),
+        frame("future_topic", {}),
+        frame("measurement", {"power_w": 250, "energy_import_kwh": 10}),
+    ]
+    with caplog.at_level("WARNING"):
+        updated = await api.receive()
+    assert updated.measurement.power_w == 250
+    assert updated.measurement.energy_import_kwh == 10
+    assert updated.device.serial == "aabbccddeeff"
+    assert updated.system.uptime_s == 10
+    assert first.measurement.power_w == 100
+    socket.close.assert_not_called()
+    assert "Ignoring" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"power_w": None, "energy_import_kwh": 5}, {"power_w": None}),
+        ({"power_w": "high", "energy_import_kwh": 5}, {"power_w": None}),
+        ({"power_w": True, "energy_import_kwh": 5}, {"power_w": None}),
+        (
+            {"power_w": 10**12, "frequency_hz": 5000, "energy_import_kwh": 5},
+            {"power_w": None, "frequency_hz": None},
+        ),
+        ({"external": "nope", "energy_import_kwh": 5}, {"external_devices": {}}),
+        # Fields the library parses itself must not reject the whole snapshot.
+        ({"timestamp": "garbage", "energy_import_kwh": 5}, {"timestamp": None}),
+        (
+            {"monthly_power_peak_timestamp": "x", "energy_import_kwh": 5},
+            {"monthly_power_peak_timestamp": None},
+        ),
+        ({"tariff": "two", "energy_import_kwh": 5}, {"tariff": None}),
+        ({"any_power_fail_count": "x", "energy_import_kwh": 5}, {"any_power_fail_count": None}),
+    ],
+)
+async def test_bad_fields_only_drop_themselves(caplog, data, expected):
+    """One bad field must not freeze the other sensors or drop the stream."""
+    api, _, socket = client(initial())
+    await api.connect()
+    socket.receive.side_effect = [frame("measurement", data)]
+    with caplog.at_level("WARNING"):
+        updated = await api.receive()
+    assert updated.measurement.energy_import_kwh == 5
+    for key, value in expected.items():
+        assert (getattr(updated.measurement, key) or {}) == (value or {})
+    if any(value is not None for value in data.values() if value != 5):
+        assert "Ignoring invalid HomeWizard measurement fields" in caplog.text
+    socket.close.assert_not_called()
+
+
+async def test_persistent_null_field_keeps_the_stream():
+    frames = [
+        frame("measurement", {"power_w": 10 + n, "power_l2_w": None}) for n in range(40)
+    ]
+    api, _, socket = client(initial() + frames)
+    await api.connect()
+    for n in range(40):
+        assert (await api.receive()).measurement.power_w == 10 + n
+    socket.close.assert_not_called()
+
+
+async def test_bad_external_meters_are_dropped():
+    gas = {
+        "unique_id": "4730303031",
+        "type": "gas_meter",
+        "timestamp": "2026-10-29T12:00:00",
+        "value": 1.5,
+        "unit": "m3",
+    }
+    api, _, socket = client(initial())
+    await api.connect()
+    socket.receive.side_effect = [
+        frame(
+            "measurement",
+            {
+                "power_w": 5,
+                "external": [
+                    1,
+                    {**gas, "value": None},
+                    {**gas, "value": 10**15},
+                    {**gas, "timestamp": None},
+                    {**gas, "timestamp": "garbage"},
+                    {**gas, "unit": None},
+                    {**gas, "type": None},
+                    {**gas, "unique_id": 5},
+                    {**gas, "unique_id": "5730303031", "value": 2.5},
+                ],
+            },
+        )
+    ]
+    updated = await api.receive()
+    assert updated.measurement.power_w == 5
+    assert [d.value for d in updated.measurement.external_devices.values()] == [2.5]
+
+
+async def test_replayed_measurement_is_not_fresh(monkeypatch):
+    """A silent meter replays its last reading on subscribe after a reconnect."""
+    import custom_components.homewizard_instant.websocket as module
+
+    from types import SimpleNamespace
+
+    clock = iter([0.0, 10.0, 20.0])
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    measurement = {"power_w": 1, "timestamp": "2026-01-01T00:00:00"}
+    api, _, socket = client(initial()[:-1] + [frame("measurement", measurement)])
+    await api.connect()
+    assert api.last_measurement == 10.0
+    socket.receive.side_effect = initial()[:-1] + [frame("measurement", measurement)]
+    await api.connect()
+    assert api.last_measurement == 10.0
+    socket.receive.side_effect = [
+        frame("measurement", {**measurement, "timestamp": "2026-01-01T00:00:01"})
+    ]
+    await api.receive()
+    assert api.last_measurement == 20.0
+    assert api.reported_generation == 1
+    await api.close()
+
+
+async def test_repeated_live_measurement_is_fresh(monkeypatch):
+    """The same telegram on an open socket is a new report, not a replay."""
+    import custom_components.homewizard_instant.websocket as module
+
+    from types import SimpleNamespace
+
+    clock = iter([0.0, 10.0, 30.0])
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    measurement = {"power_w": 1, "timestamp": "2026-01-01T00:00:00"}
+    api, _, socket = client(initial()[:-1] + [frame("measurement", measurement)])
+    await api.connect()
+    assert api.last_measurement == 10.0
+    assert api.reported_generation == 0
+    socket.receive.side_effect = [frame("measurement", measurement)]
+    await api.receive()
+    assert api.last_measurement == 30.0
+    assert api.reported_generation == 1
+    await api.close()
+
+
+async def test_last_measurement_tracks_measurements_only(monkeypatch):
+    import custom_components.homewizard_instant.websocket as module
+
+    from types import SimpleNamespace
+
+    clock = iter([50.0, 100.0, 200.0])
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    api, _, socket = client(initial())
+    await api.connect()
+    assert api.last_measurement == 100.0
+    socket.receive.side_effect = [frame("system", {"uptime_s": 20})]
+    await api.receive()
+    assert api.last_measurement == 100.0
+    socket.receive.side_effect = [frame("measurement", {"power_w": 1})]
+    await api.receive()
+    assert api.last_measurement == 200.0
+    await api.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(401, UnauthorizedError), (500, WSServerHandshakeError)],
+)
+async def test_websocket_handshake_status(status, error):
+    session = Mock()
+    info = Mock()
+    info.real_url = "wss://192.0.2.1/api/ws"
+    session.ws_connect = AsyncMock(
+        side_effect=WSServerHandshakeError(info, (), status=status, message="no")
+    )
+    api = HomeWizardWebSocket(
+        session,
+        "192.0.2.1",
+        "secret",
+        "aabbccddeeff",
+        create_ssl_context(),
+    )
+    with pytest.raises(error):
+        await api.connect()
+
+
+async def test_junk_before_handshake_is_skipped():
+    api, _, _socket = client(
+        [WSMessage(WSMsgType.TEXT, "{", None), *initial()]
+    )
+    data = await api.connect()
+    assert data.measurement.power_w == 100
+    await api.close()
+
+
+async def test_identity_change_after_connect():
+    api, _, _socket = client(initial())
+    await api.connect()
+    api._socket.receive.side_effect = [frame("device", {**DEVICE, "serial": "other"})]
+    with pytest.raises(RequestError, match="identity changed"):
+        await api.receive()
+    await api.close()
+
+
+async def test_invalid_tariff_keeps_the_measurement():
+    """Meters sometimes report tariff 0. The library clears it and keeps power."""
+    api, _, socket = client(initial())
+    await api.connect()
+    socket.receive.side_effect = [
+        frame("measurement", {"power_w": 80, "energy_import_kwh": 4, "tariff": 0})
+    ]
+    updated = await api.receive()
+    assert updated.measurement.power_w == 80
+    assert updated.measurement.energy_import_kwh == 4
+    assert updated.measurement.tariff is None
+    await api.close()
+
+
+async def test_low_rssi_is_a_valid_system_update():
+    api, _, socket = client(initial())
+    await api.connect()
+    socket.receive.side_effect = [
+        frame("system", {"wifi_rssi_db": -127, "uptime_s": 15, "wifi_ssid": "lab"})
+    ]
+    updated = await api.receive()
+    assert updated.system is not None
+    assert updated.system.uptime_s == 15
+    assert updated.system.wifi_strength_pct == 0
+    await api.close()
+
+
+async def test_repeated_invalid_frames_fail_the_stream():
+    from custom_components.homewizard_instant.websocket import _INVALID_LIMIT
+
+    junk = [WSMessage(WSMsgType.TEXT, "{", None) for _ in range(_INVALID_LIMIT)]
+    api, _, _socket = client(initial() + junk)
+    await api.connect()
+    with pytest.raises(RequestError, match="repeated invalid"):
+        await api.receive()
+    await api.close()
+
+
 async def test_wrong_identity():
     frames = initial()
     frames[3] = frame("device", {**DEVICE, "serial": "other"})
     api, _, socket = client(frames)
-    with pytest.raises(RequestError):
+    with pytest.raises(RequestError, match="identity changed from aabbccddeeff to other"):
         await api.connect()
     socket.close.assert_awaited_once()
 
 
+async def test_serial_case_matches():
+    """The device topic serial is compared without regard to letter case."""
+    api, _, _socket = client(initial(), serial="AABBCCDDEEFF")
+    data = await api.connect()
+    assert data.device.serial == "aabbccddeeff"
+    await api.close()
+
+
+async def test_request_reads_a_topic_once_connected():
+    api, _, socket = client(initial())
+    await api.request("system")
+    socket.send_json.assert_not_called()
+    await api.connect()
+    socket.send_json.reset_mock()
+    socket.closed = False
+    await api.request("system")
+    socket.send_json.assert_awaited_once_with({"type": "system"})
+    socket.send_json.side_effect = ConnectionResetError()
+    await api.request("system")
+    await api.close()
+    socket.send_json.reset_mock()
+    await api.request("system")
+    socket.send_json.assert_not_called()
+
+
+async def test_dead_link_is_detected_quickly():
+    """Pings start after 15 s without frames; the stream read has an idle cap."""
+    import custom_components.homewizard_instant.websocket as module
+
+    api, session, socket = client(initial())
+    await api.connect()
+    assert session.ws_connect.call_args.kwargs["heartbeat"] == 15
+    # The handshake has its own 30 s budget; only the live stream gets the cap.
+    assert all(
+        call.kwargs.get("timeout") is None for call in socket.receive.call_args_list
+    )
+    socket.receive.side_effect = [frame("measurement", {"power_w": 2})]
+    await api.receive()
+    assert socket.receive.call_args.kwargs["timeout"] == module._IDLE_TIMEOUT
+    # Longer than one system refresh: a silent P1 port still gets that reply.
+    assert module._IDLE_TIMEOUT > module.SYSTEM_REFRESH_INTERVAL.total_seconds()
+    await api.close()
+
+
+async def test_wedged_socket_raises_a_connection_error():
+    api, _, socket = client(initial())
+    await api.connect()
+    socket.receive.side_effect = TimeoutError
+    with pytest.raises(RequestError, match="No HomeWizard WebSocket frame for 90 s"):
+        await api.receive()
+    await api.close()
+
+
 async def test_kwh_meter_snapshot():
-    """kWh meters verify the energymeter identity and parse per-phase fields."""
+    """kWh meters connect by serial and parse per-phase fields."""
     device = {**DEVICE, "product_type": "HWE-KWH3", "product_name": "kWh meter"}
-    socket = AsyncMock()
-    socket.receive.side_effect = [
-        frame("authorization_requested", {"api_version": "2.0.0"}),
-        frame("authorized"),
-        frame("device", device),
-        frame("system", {"wifi_rssi_db": -60}),
-        frame(
-            "measurement",
-            {
-                "energy_import_kwh": 12.5,
-                "energy_export_kwh": 1.5,
-                "power_w": 600,
-                "power_l1_w": 100,
-                "power_l2_w": 200,
-                "power_l3_w": 300,
-                "voltage_l1_v": 230.1,
-                "current_l2_a": 0.9,
-                "power_factor_l3": 0.95,
-                "frequency_hz": 50,
-            },
-        ),
-    ]
-    session = Mock()
-    session.ws_connect = AsyncMock(return_value=socket)
-    api = HomeWizardWebSocket(
-        session,
-        "192.168.1.3",
-        "secret",
-        "appliance/energymeter/aabbccddeeff",
-        create_ssl_context(),
+    api, _, _ = client(
+        [
+            frame("authorization_requested", {"api_version": "2.0.0"}),
+            frame("authorized"),
+            frame("device", device),
+            frame("system", {"wifi_rssi_db": -60}),
+            frame(
+                "measurement",
+                {
+                    "energy_import_kwh": 12.5,
+                    "energy_export_kwh": 1.5,
+                    "power_w": 600,
+                    "power_l1_w": 100,
+                    "power_l2_w": 200,
+                    "power_l3_w": 300,
+                    "voltage_l1_v": 230.1,
+                    "current_l2_a": 0.9,
+                    "power_factor_l3": 0.95,
+                    "frequency_hz": 50,
+                },
+            ),
+        ]
     )
     data = await api.connect()
     assert data.device.model_name == "kWh Meter 3-phase"
@@ -189,6 +513,4 @@ async def test_kwh_meter_snapshot():
     assert data.measurement.voltage_l1_v == 230.1
     assert data.measurement.power_factor_l3 == 0.95
     assert data.measurement.tariff is None
-    kwargs = session.ws_connect.call_args.kwargs
-    assert kwargs["server_hostname"] == "appliance/energymeter/aabbccddeeff"
     await api.close()

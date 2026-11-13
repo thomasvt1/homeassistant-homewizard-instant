@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from homeassistant.const import Platform
 from homewizard_energy.const import Model
@@ -28,3 +29,12 @@ LOGGER = logging.getLogger(__package__)
 CONF_PRODUCT_NAME = "product_name"
 CONF_PRODUCT_TYPE = "product_type"
 CONF_SERIAL = "serial"
+
+# Mark entities unavailable when the meter stops sending measurements while the
+# socket itself stays up (for example an unplugged P1 cable). DSMR 2-4 meters
+# report every 10 s, DSMR 5 and kWh meters every second.
+STALE_AFTER = timedelta(seconds=60)
+
+# The system topic only pushes LED and cloud changes, so Wi-Fi signal and uptime
+# are read once per interval over the open WebSocket.
+SYSTEM_REFRESH_INTERVAL = timedelta(seconds=60)
